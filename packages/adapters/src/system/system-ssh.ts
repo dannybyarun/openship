@@ -13,8 +13,9 @@ import { shellSplitWords } from "@repo/core";
  * resolves the agent / `~/.ssh/config` / default keys / macOS keychain — the
  * same thing that makes `ssh root@host` work in a terminal). Every system-`ssh`
  * invocation — command exec, file ops, port-forward, Docker socket-forward, the
- * interactive shell — shares the argv and env produced here so they all ride
- * one authenticated ControlMaster connection ("reuse the existing ssh tunnel").
+ * interactive shell — shares the argv and env produced here. POSIX hosts reuse
+ * one authenticated ControlMaster connection; Windows uses direct OpenSSH
+ * connections because its control-socket path is not reliable.
  */
 
 /** Default connect timeout (seconds) handed to `ssh -o ConnectTimeout`. */
@@ -24,8 +25,9 @@ const CONNECT_TIMEOUT_SECONDS = 15;
  * Allocate a short, unique ControlMaster socket path.
  *
  * Kept short because the control socket is a Unix domain socket, whose path is
- * capped at ~104 bytes by the OS. POSIX hosts use `/tmp`; Windows uses its native
- * temp directory so a Windows Cloudflare ProxyCommand can use the same path.
+ * capped at ~104 bytes by the OS. POSIX hosts use `/tmp`; Windows still gets a
+ * native temp path for compatibility with callers, but does not pass it to
+ * OpenSSH because Windows control sockets are unreliable.
  */
 export function makeControlPath(): string {
   const name = `openship-ssh-${process.pid}-${randomBytes(6).toString("hex")}.sock`;
@@ -42,10 +44,15 @@ export function makeControlPath(): string {
  * Does NOT include the target (`user@host`) or a remote command — callers
  * append those.
  */
+export function supportsSshControlMaster(platform = process.platform): boolean {
+  return platform !== "win32";
+}
+
 export function buildBaseSshArgs(
   config: SshConfig,
   controlPath: string,
   identityFile?: string,
+  platform = process.platform,
 ): string[] {
   const args: string[] = [
     "-p", String(config.port ?? 22),
@@ -56,13 +63,19 @@ export function buildBaseSshArgs(
     "-o", `ConnectTimeout=${CONNECT_TIMEOUT_SECONDS}`,
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=3",
-    // One authenticated master; subsequent ssh calls attach to it.
-    "-o", "ControlMaster=auto",
-    "-o", `ControlPath=${controlPath}`,
-    // Keep the master alive across brief idle gaps (the connection manager
-    // caches the executor for ~5 min); dispose() tears it down explicitly.
-    "-o", "ControlPersist=300",
   ];
+
+  // Unix OpenSSH uses a Unix-domain control socket for multiplexing. The
+  // Windows OpenSSH client is not reliable with this path and can fail with
+  // `getsockname failed: Not a socket`; direct connections still preserve all
+  // ProxyCommand behavior and are safer for the desktop build.
+  if (supportsSshControlMaster(platform)) {
+    args.push(
+      "-o", "ControlMaster=auto",
+      "-o", `ControlPath=${controlPath}`,
+      "-o", "ControlPersist=300",
+    );
+  }
 
   if (identityFile) {
     args.push("-i", identityFile, "-o", "IdentitiesOnly=yes");

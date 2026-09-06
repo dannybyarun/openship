@@ -23,6 +23,23 @@ describe("buildBaseSshArgs", () => {
     expect(args).not.toContain("Files");
   });
 
+  it("omits Unix control sockets on Windows while preserving ProxyCommand", () => {
+    const args = buildBaseSshArgs(
+      {
+        host: "ssh.example.com",
+        username: "arun",
+        sshProxyCommand: WINDOWS_CLOUDFLARED,
+      },
+      "C:\\\\Users\\\\arun\\\\AppData\\\\Local\\\\Temp\\\\openship-control.sock",
+      undefined,
+      "win32",
+    );
+
+    expect(args).not.toContain("ControlMaster=auto");
+    expect(args.some((arg) => arg.startsWith("ControlPath="))).toBe(false);
+    expect(args).toContain("ProxyCommand=" + WINDOWS_CLOUDFLARED);
+  });
+
   it("keeps quoted extra SSH arguments compatible with the shared splitter", () => {
     const args = buildBaseSshArgs(
       {

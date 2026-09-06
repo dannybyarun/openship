@@ -202,6 +202,14 @@ export class SystemSshExecutor implements CommandExecutor {
 
   /** Open (once) the multiplexed master connection. Authenticates here. */
   private async ensureMaster(): Promise<void> {
+    // Windows OpenSSH does not reliably support the Unix-domain ControlPath
+    // used by the pooled path. buildBaseSshArgs omits ControlMaster there, so
+    // each operation must use a direct SSH process instead of starting a
+    // background master that cannot be reused.
+    if (process.platform === "win32") {
+      await this.ensureIdentityFile();
+      return;
+    }
     if (this.masterPromise) return this.masterPromise;
     await this.ensureIdentityFile();
     this.masterPromise = (async () => {
@@ -590,6 +598,9 @@ export class SystemSshExecutor implements CommandExecutor {
 
   /** Ensure a StreamLocal forward (local unix socket → remote socket) on the master. */
   private async ensureSocketForward(remoteSocket: string): Promise<string> {
+    if (process.platform === "win32") {
+      throw new Error("Windows OpenSSH does not support the Unix control-socket forwarding path");
+    }
     let pending = this.socketForwards.get(remoteSocket);
     if (!pending) {
       pending = (async () => {
