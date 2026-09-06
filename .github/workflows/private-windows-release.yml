@@ -1,0 +1,123 @@
+name: Private Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create on the fork"
+        required: true
+        type: string
+        default: private-windows-v0.7.2-proxy.1
+      source_ref:
+        description: "Branch or commit containing the build"
+        required: true
+        type: string
+        default: feat/ssh-proxy-command
+
+permissions:
+  contents: write
+
+concurrency:
+  group: private-windows-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Windows x64 ZIP
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Read Bun version
+        id: bun-version
+        shell: bash
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Restore Bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~\AppData\Local\bun\install\cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build desktop package
+        env:
+          CI: "true"
+        run: bun run --cwd apps/desktop make
+
+      - name: Collect Windows ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $zip = Get-ChildItem -Path apps/desktop/out/make -Filter *.zip -File -Recurse | Select-Object -First 1
+          if ($null -eq $zip) {
+            Get-ChildItem -Path apps/desktop/out/make -File -Recurse | Select-Object FullName
+            throw "No Windows ZIP was produced"
+          }
+          Copy-Item $zip.FullName dist/Openship-win32-x64.zip
+          (Get-FileHash dist/Openship-win32-x64.zip -Algorithm SHA256).Hash.ToLower() + "  Openship-win32-x64.zip" |
+            Set-Content dist/Openship-win32-x64.zip.sha256 -NoNewline
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: private-windows-release
+          path: |
+            dist/Openship-win32-x64.zip
+            dist/Openship-win32-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish fork GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: private-windows-release
+          path: dist
+
+      - name: Create or update fork release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              dist/Openship-win32-x64.zip \
+              dist/Openship-win32-x64.zip.sha256 \
+              --clobber
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_REF" \
+              --title "Openship Windows $TAG" \
+              --notes "Private-use Windows desktop build from $SOURCE_REF. This release contains only the Windows ZIP and SHA-256 checksum." \
+              --prerelease \
+              dist/Openship-win32-x64.zip \
+              dist/Openship-win32-x64.zip.sha256
+          fi
