@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm as fsRm, stat, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, rm as fsRm, stat, unlink, writeFile } from "node:fs/promises";
 import { connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
@@ -36,6 +36,11 @@ const execFileAsync = promisify(execFile);
  *  plane's native separators. The plain `join` is the other namespace: LOCAL
  *  staging paths under tmpdir. See SshExecutor for what a leaked backslash costs. */
 const remoteDirname = posix.dirname;
+
+function formatPrivateKeyForOpenSsh(privateKey: string): string {
+  const normalized = privateKey.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
+}
 
 function abortError(operation: string, signal: AbortSignal): Error {
   const reason = signal.reason;
@@ -78,6 +83,10 @@ export class SystemSshExecutor implements CommandExecutor {
   private readonly config: SshConfig;
   private readonly abortScope = new AsyncLocalStorage<AbortSignal>();
   private readonly controlPath = makeControlPath();
+  /** Short-lived identity file used because OpenSSH accepts a path, not key text. */
+  private identityFile: string | null = null;
+  private identityDir: string | null = null;
+  private identityPromise: Promise<void> | null = null;
   /** Resolves once the ControlMaster connection is established. */
   private masterPromise: Promise<void> | null = null;
   /** Remote-socket → local-forward-socket, one StreamLocal forward per target. */
@@ -120,8 +129,33 @@ export class SystemSshExecutor implements CommandExecutor {
     if (signal?.aborted) throw abortError(operation, signal);
   }
 
+  private async ensureIdentityFile(): Promise<void> {
+    if (!this.config.privateKey || this.config.sshAgent || this.identityFile) return;
+    if (this.identityPromise) return this.identityPromise;
+
+    this.identityPromise = (async () => {
+      const dir = await mkdtemp(join(tmpdir(), "openship-ssh-key-"));
+      const path = join(dir, "id_key");
+      try {
+        await writeFile(path, formatPrivateKeyForOpenSsh(this.config.privateKey!), { mode: 0o600 });
+        await chmod(path, 0o600);
+        this.identityDir = dir;
+        this.identityFile = path;
+      } catch (err) {
+        await fsRm(dir, { recursive: true, force: true }).catch(() => {});
+        throw err;
+      }
+    })();
+
+    try {
+      await this.identityPromise;
+    } finally {
+      this.identityPromise = null;
+    }
+  }
+
   private baseArgs(): string[] {
-    return buildBaseSshArgs(this.config, this.controlPath);
+    return buildBaseSshArgs(this.config, this.controlPath, this.identityFile ?? undefined);
   }
 
   onDisconnect(cb: (err: Error) => void): () => void {
@@ -169,6 +203,7 @@ export class SystemSshExecutor implements CommandExecutor {
   /** Open (once) the multiplexed master connection. Authenticates here. */
   private async ensureMaster(): Promise<void> {
     if (this.masterPromise) return this.masterPromise;
+    await this.ensureIdentityFile();
     this.masterPromise = (async () => {
       try {
         // -f backgrounds after auth, -N runs no command: the foreground
@@ -506,6 +541,37 @@ export class SystemSshExecutor implements CommandExecutor {
     }
   }
 
+  async openDockerDialStdio(): Promise<Duplex> {
+    await this.ensureMaster();
+
+    // Do not use ENV_PREFIX here: Docker's dial-stdio protocol is a raw
+    // byte-stream, so even a harmless shell export before the daemon response
+    // corrupts the Docker HTTP connection. The command is executed by the OS
+    // ssh client, which means ProxyCommand (including Cloudflare's quoted
+    // Windows executable path) is applied to this channel as well.
+    const child = spawn(
+      "ssh",
+      [...this.baseArgs(), sshTarget(this.config), "docker system dial-stdio"],
+      { env: sshChildEnv(this.config), stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const duplex = Duplex.from({ writable: child.stdin, readable: child.stdout }) as Duplex & {
+      stderr: typeof child.stderr;
+    };
+    // The bridge uses stderr for diagnostics when the remote Docker command
+    // cannot start. Keep it attached to the returned stream rather than
+    // discarding the only useful explanation for a failed Docker connection.
+    duplex.stderr = child.stderr;
+    duplex.on("close", () => {
+      try { child.kill(); } catch { /* already gone */ }
+    });
+    child.on("exit", () => duplex.destroy());
+    child.on("error", (error) => duplex.destroy(error));
+    child.stdin.on("error", () => {});
+    child.stdout.on("error", () => {});
+    child.stderr.on("error", () => {});
+    return duplex;
+  }
+
   async forwardPort(remoteHost: string, remotePort: number): Promise<Duplex> {
     await this.ensureMaster();
     // -W wires this ssh process's stdio straight to remoteHost:remotePort
@@ -528,7 +594,10 @@ export class SystemSshExecutor implements CommandExecutor {
     if (!pending) {
       pending = (async () => {
         await this.ensureMaster();
-        const localSocket = `/tmp/openship-fwd-${process.pid}-${randomBytes(6).toString("hex")}.sock`;
+        const localSocket =
+          process.platform === "win32"
+            ? join(tmpdir(), `openship-fwd-${process.pid}-${randomBytes(6).toString("hex")}.sock`)
+            : `/tmp/openship-fwd-${process.pid}-${randomBytes(6).toString("hex")}.sock`;
         await execFileAsync(
           "ssh",
           [...this.baseArgs(), "-O", "forward", "-L", `${localSocket}:${remoteSocket}`, sshTarget(this.config)],
@@ -681,5 +750,10 @@ export class SystemSshExecutor implements CommandExecutor {
       await unlink(socket).catch(() => {});
     }
     this.localSockets.clear();
+    if (this.identityDir) {
+      await fsRm(this.identityDir, { recursive: true, force: true }).catch(() => {});
+      this.identityDir = null;
+      this.identityFile = null;
+    }
   }
 }

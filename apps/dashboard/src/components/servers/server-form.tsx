@@ -116,9 +116,10 @@ export function ServerForm({
   const [showPassphrase, setShowPassphrase] = useState(false);
   const keyFileInputRef = useRef<HTMLInputElement>(null);
   const [showAdvanced, setShowAdvanced] = useState(
-    !!(server?.sshJumpHost || server?.sshArgs),
+    !!(server?.sshJumpHost || server?.sshProxyCommand || server?.sshArgs),
   );
   const [jumpHost, setJumpHost] = useState(server?.sshJumpHost ?? "");
+  const [proxyCommand, setProxyCommand] = useState(server?.sshProxyCommand ?? "");
   const [extraArgs, setExtraArgs] = useState(server?.sshArgs ?? "");
 
   // A key file is only pickable where the API reads it from — this machine, i.e.
@@ -200,6 +201,7 @@ export function ServerForm({
         sshUser: trimmedUser,
         sshAuthMethod,
         sshJumpHost: trimmedJumpHost || null,
+        sshProxyCommand: proxyCommand.trim() || null,
         sshArgs: trimmedExtraArgs || null,
       };
 
@@ -287,6 +289,7 @@ export function ServerForm({
       // for a host only reachable through a bastion — a red "Test connection" on
       // a configuration that works.
       if (jumpHost.trim()) payload.sshJumpHost = jumpHost.trim();
+      if (proxyCommand.trim()) payload.sshProxyCommand = proxyCommand.trim();
       if (extraArgs.trim()) payload.sshArgs = extraArgs.trim();
 
       const result = await systemApi.testConnection(payload);
@@ -689,6 +692,26 @@ export function ServerForm({
                 />
               </div>
               <div>
+                <label className={LABEL}>
+                  {t.servers.form.proxyCommand}{" "}
+                  <span className="text-muted-foreground/50 font-normal">
+                    {t.servers.form.optional}
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={proxyCommand}
+                  onChange={(e) => setProxyCommand(e.target.value)}
+                  placeholder={t.servers.form.proxyCommandPlaceholder}
+                  spellCheck={false}
+                  autoComplete="off"
+                  className={INPUT}
+                />
+                <p className="text-xs text-muted-foreground/60 mt-1.5">
+                  {t.servers.form.proxyCommandHelp}
+                </p>
+              </div>
+              <div className="sm:col-span-2">
                 <label className={LABEL}>
                   {t.servers.form.extraArgs}{" "}
                   <span className="text-muted-foreground/50 font-normal">

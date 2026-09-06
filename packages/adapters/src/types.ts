@@ -785,11 +785,13 @@ export interface SshConfig {
    * Route this connection through the OS `ssh` binary (SystemSshExecutor)
    * instead of the in-process `ssh2` client. Set for "agent" auth, where only
    * the real OpenSSH client reliably resolves the agent / `~/.ssh/config` /
-   * default keys / keychain. Password and key auth leave this unset.
+   * default keys / keychain, or when `sshProxyCommand` requires OpenSSH.
    */
   useSystemSsh?: boolean;
   /** Optional jump/bastion host (`ssh -J`). Honored by the system-ssh path. */
   sshJumpHost?: string;
+  /** OpenSSH ProxyCommand value, passed as one `-o ProxyCommand=...` option. */
+  sshProxyCommand?: string;
   /** Extra raw `ssh` CLI arguments. Honored by the system-ssh path. */
   sshArgs?: string;
   /**
