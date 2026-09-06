@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { SshConfig } from "../types";
+import { shellSplitWords } from "@repo/core";
 
 /**
  * Shared "agent case" logic for the system-`ssh` path.
@@ -20,13 +23,13 @@ const CONNECT_TIMEOUT_SECONDS = 15;
 /**
  * Allocate a short, unique ControlMaster socket path.
  *
- * Kept under `/tmp` (and short) because the control socket is a Unix domain
- * socket, whose path is capped at ~104 bytes by the OS. macOS's per-user
- * tmpdir is long enough to blow that budget, so we use `/tmp` directly — it
- * exists on every macOS/Linux host (the platforms this path supports).
+ * Kept short because the control socket is a Unix domain socket, whose path is
+ * capped at ~104 bytes by the OS. POSIX hosts use `/tmp`; Windows uses its native
+ * temp directory so a Windows Cloudflare ProxyCommand can use the same path.
  */
 export function makeControlPath(): string {
-  return `/tmp/openship-ssh-${process.pid}-${randomBytes(6).toString("hex")}.sock`;
+  const name = `openship-ssh-${process.pid}-${randomBytes(6).toString("hex")}.sock`;
+  return process.platform === "win32" ? join(tmpdir(), name) : `/tmp/${name}`;
 }
 
 /**
@@ -39,7 +42,11 @@ export function makeControlPath(): string {
  * Does NOT include the target (`user@host`) or a remote command — callers
  * append those.
  */
-export function buildBaseSshArgs(config: SshConfig, controlPath: string): string[] {
+export function buildBaseSshArgs(
+  config: SshConfig,
+  controlPath: string,
+  identityFile?: string,
+): string[] {
   const args: string[] = [
     "-p", String(config.port ?? 22),
     // BatchMode keeps the OS ssh non-interactive: agent/keys only, never a
@@ -57,16 +64,26 @@ export function buildBaseSshArgs(config: SshConfig, controlPath: string): string
     "-o", "ControlPersist=300",
   ];
 
+  if (identityFile) {
+    args.push("-i", identityFile, "-o", "IdentitiesOnly=yes");
+  }
+
   if (config.sshJumpHost?.trim()) {
     args.push("-J", config.sshJumpHost.trim());
   }
 
-  // Extra raw args are a freeform string (e.g. `-o IPQoS=throughput`); split on
-  // whitespace. This matches how the field is presented in the UI.
+  // ProxyCommand must remain one argv value. In particular, Cloudflare's Windows
+  // command commonly contains a quoted path with spaces:
+  // `"C:\\Program Files (x86)\\cloudflared\\cloudflared.exe" access ssh --hostname %h`.
+  // Passing `-o` and the full value separately avoids the shell splitting the path.
+  if (config.sshProxyCommand?.trim()) {
+    args.push("-o", `ProxyCommand=${config.sshProxyCommand.trim()}`);
+  }
+
+  // Extra raw args are a freeform string (e.g. `-o IPQoS=throughput`). Use the
+  // shared quote-aware splitter so existing quoted options keep working too.
   if (config.sshArgs?.trim()) {
-    for (const token of config.sshArgs.trim().split(/\s+/)) {
-      if (token) args.push(token);
-    }
+    args.push(...shellSplitWords(config.sshArgs));
   }
 
   return args;
