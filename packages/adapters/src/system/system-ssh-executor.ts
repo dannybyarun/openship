@@ -76,8 +76,8 @@ function describeSshFailure(stderr: string, fallback: string): Error {
  * the agent / `~/.ssh/config` / default keys / macOS keychain (the same thing
  * that makes `ssh root@host` work). Everything — exec, file ops, transfer,
  * port-forward, Docker socket-forward, the interactive shell — rides ONE
- * authenticated OpenSSH ControlMaster connection. Password/key auth keep using
- * the in-process `ssh2` SshExecutor.
+ * authenticated OpenSSH ControlMaster connection. Password auth is supplied
+ * non-interactively through a temporary SSH_ASKPASS helper.
  */
 export class SystemSshExecutor implements CommandExecutor {
   private readonly config: SshConfig;
@@ -87,6 +87,9 @@ export class SystemSshExecutor implements CommandExecutor {
   private identityFile: string | null = null;
   private identityDir: string | null = null;
   private identityPromise: Promise<void> | null = null;
+  /** Short-lived SSH_ASKPASS wrapper used for non-interactive password auth. */
+  private askpassDir: string | null = null;
+  private askpassPromise: Promise<void> | null = null;
   /** Resolves once the ControlMaster connection is established. */
   private masterPromise: Promise<void> | null = null;
   /** Remote-socket → local-forward-socket, one StreamLocal forward per target. */
@@ -127,6 +130,58 @@ export class SystemSshExecutor implements CommandExecutor {
 
   private throwIfAborted(operation: string, signal = this.operationSignal()): void {
     if (signal?.aborted) throw abortError(operation, signal);
+  }
+
+  private async ensureAskpassHelper(): Promise<void> {
+    if (!this.config.password || this.config.sshAskpassPath) return;
+    if (this.askpassPromise) return this.askpassPromise;
+
+    this.askpassPromise = (async () => {
+      const dir = await mkdtemp(join(tmpdir(), "openship-ssh-askpass-"));
+      const script = join(dir, "askpass.js");
+      const launcher = join(dir, process.platform === "win32" ? "askpass.cmd" : "askpass");
+      try {
+        await writeFile(
+          script,
+          "process.stdout.write(process.env.OPENSHIP_SSH_ASKPASS_PASSWORD ?? \"\");\n",
+          { mode: 0o600 },
+        );
+        if (process.platform === "win32") {
+          await writeFile(
+            launcher,
+            [
+              "@echo off",
+              "if defined OPENSHIP_SSH_ASKPASS_NODE (",
+              "  set \"ELECTRON_RUN_AS_NODE=1\"",
+              "  \"%OPENSHIP_SSH_ASKPASS_NODE%\" \"%~dp0askpass.js\"",
+              ") else (",
+              "  node \"%~dp0askpass.js\"",
+              ")",
+              "",
+            ].join("\r\n"),
+          );
+        } else {
+          await writeFile(
+            launcher,
+            "#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec \"${OPENSHIP_SSH_ASKPASS_NODE:-node}\" \"$(dirname \"$0\")/askpass.js\"\n",
+            { mode: 0o700 },
+          );
+          await chmod(launcher, 0o700);
+        }
+        this.config.sshAskpassPath = launcher;
+        this.config.sshAskpassNodePath = process.execPath;
+        this.askpassDir = dir;
+      } catch (err) {
+        await fsRm(dir, { recursive: true, force: true }).catch(() => {});
+        throw err;
+      }
+    })();
+
+    try {
+      await this.askpassPromise;
+    } finally {
+      this.askpassPromise = null;
+    }
   }
 
   private async ensureIdentityFile(): Promise<void> {
@@ -207,10 +262,12 @@ export class SystemSshExecutor implements CommandExecutor {
     // each operation must use a direct SSH process instead of starting a
     // background master that cannot be reused.
     if (process.platform === "win32") {
+      await this.ensureAskpassHelper();
       await this.ensureIdentityFile();
       return;
     }
     if (this.masterPromise) return this.masterPromise;
+    await this.ensureAskpassHelper();
     await this.ensureIdentityFile();
     this.masterPromise = (async () => {
       try {
@@ -765,6 +822,12 @@ export class SystemSshExecutor implements CommandExecutor {
       await fsRm(this.identityDir, { recursive: true, force: true }).catch(() => {});
       this.identityDir = null;
       this.identityFile = null;
+    }
+    if (this.askpassDir) {
+      await fsRm(this.askpassDir, { recursive: true, force: true }).catch(() => {});
+      this.askpassDir = null;
+      this.config.sshAskpassPath = undefined;
+      this.config.sshAskpassNodePath = undefined;
     }
   }
 }

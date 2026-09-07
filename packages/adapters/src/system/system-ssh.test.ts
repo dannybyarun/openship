@@ -40,6 +40,23 @@ describe("buildBaseSshArgs", () => {
     expect(args).toContain("ProxyCommand=" + WINDOWS_CLOUDFLARED);
   });
 
+  it("uses SSH_ASKPASS-compatible password authentication for ProxyCommand", () => {
+    const args = buildBaseSshArgs(
+      {
+        host: "ssh.example.com",
+        password: "secret",
+        sshProxyCommand: "cloudflared access ssh --hostname %h",
+      },
+      "/tmp/openship-control.sock",
+    );
+
+    expect(args).toContain("BatchMode=no");
+    expect(args).toContain("PreferredAuthentications=password,keyboard-interactive");
+    expect(args).toContain("PubkeyAuthentication=no");
+    expect(args).not.toContain("BatchMode=yes");
+    expect(args.join(" ")).not.toContain("secret");
+  });
+
   it("keeps quoted extra SSH arguments compatible with the shared splitter", () => {
     const args = buildBaseSshArgs(
       {
@@ -71,6 +88,24 @@ describe("sshChildEnv", () => {
     );
 
     expect(env.PATH?.split(";")[0]).toBe("C:\\Openship\\resources\\cloudflared");
+  });
+
+  it("passes only the SSH_ASKPASS contract to password child processes", () => {
+    const env = sshChildEnv(
+      {
+        host: "ssh.example.com",
+        password: "secret",
+        sshAskpassPath: "C:\\Temp\\openship-askpass.cmd",
+        sshAskpassNodePath: "C:\\Program Files\\Openship\\openship.exe",
+      },
+      "win32",
+      { PATH: "C:\\Windows\\System32" },
+    );
+
+    expect(env.SSH_ASKPASS).toBe("C:\\Temp\\openship-askpass.cmd");
+    expect(env.SSH_ASKPASS_REQUIRE).toBe("force");
+    expect(env.OPENSHIP_SSH_ASKPASS_PASSWORD).toBe("secret");
+    expect(env.OPENSHIP_SSH_ASKPASS_NODE).toBe("C:\\Program Files\\Openship\\openship.exe");
   });
 
   it("does not alter PATH for non-Windows callers", () => {
