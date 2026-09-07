@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, win32 as win32Path } from "node:path";
 
 import type { SshConfig } from "../types";
 import { shellSplitWords } from "@repo/core";
@@ -116,10 +116,25 @@ export function sshTarget(config: SshConfig): string {
  * and stores it on `config.sshAgent`. Without this the spawned `ssh` would not
  * see the agent and would fail exactly like the old `ssh2` path.
  */
-export function sshChildEnv(config: SshConfig): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+export function sshChildEnv(
+  config: SshConfig,
+  platform = process.platform,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
   if (config.sshAgent) {
     env.SSH_AUTH_SOCK = config.sshAgent;
+  }
+
+  // The packaged Windows desktop ships cloudflared beside the app. Prepending
+  // its directory lets the portable preset use `cloudflared access ssh ...`
+  // while preserving explicit ProxyCommand paths and developer environments.
+  const bundledCloudflared = env.OPENSHIP_CLOUDFLARED_PATH;
+  if (platform === "win32" && bundledCloudflared) {
+    const cloudflaredDir = platform === "win32"
+      ? win32Path.dirname(bundledCloudflared)
+      : dirname(bundledCloudflared);
+    env.PATH = `${cloudflaredDir};${env.PATH ?? ""}`;
   }
   return env;
 }

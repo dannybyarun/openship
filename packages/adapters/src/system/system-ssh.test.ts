@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildBaseSshArgs } from "./system-ssh";
+import { buildBaseSshArgs, sshChildEnv } from "./system-ssh";
 
 const WINDOWS_CLOUDFLARED =
   '"C:\\Program Files (x86)\\cloudflared\\cloudflared.exe" access ssh --hostname %h';
@@ -52,5 +52,39 @@ describe("buildBaseSshArgs", () => {
     expect(args).toContain("UserKnownHostsFile=/tmp/known hosts");
     expect(args).toContain("IPQoS=throughput");
     expect(args).not.toContain("hosts\"");
+  });
+});
+
+describe("sshChildEnv", () => {
+  it("prepends the bundled Cloudflare client directory on Windows", () => {
+    const env = sshChildEnv(
+      {
+        host: "ssh.example.com",
+        sshProxyCommand: "cloudflared access ssh --hostname %h",
+      },
+      "win32",
+      {
+        PATH: "C:\\Windows\\System32",
+        OPENSHIP_CLOUDFLARED_PATH:
+          "C:\\Openship\\resources\\cloudflared\\cloudflared.exe",
+      },
+    );
+
+    expect(env.PATH?.split(";")[0]).toBe("C:\\Openship\\resources\\cloudflared");
+  });
+
+  it("does not alter PATH for non-Windows callers", () => {
+    const env = sshChildEnv(
+      {
+        host: "ssh.example.com",
+      },
+      "linux",
+      {
+        PATH: "/usr/bin",
+        OPENSHIP_CLOUDFLARED_PATH: "/opt/cloudflared/cloudflared",
+      },
+    );
+
+    expect(env.PATH).toBe("/usr/bin");
   });
 });
