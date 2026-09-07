@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, win32 as win32Path } from "node:path";
 
 import type { SshConfig } from "../types";
 import { shellSplitWords } from "@repo/core";
@@ -56,9 +56,17 @@ export function buildBaseSshArgs(
 ): string[] {
   const args: string[] = [
     "-p", String(config.port ?? 22),
-    // BatchMode keeps the OS ssh non-interactive: agent/keys only, never a
-    // password/passphrase prompt that would hang a headless API process.
-    "-o", "BatchMode=yes",
+    // Password-authenticated ProxyCommand connections use SSH_ASKPASS (set by
+    // sshChildEnv) because the API has no interactive stdin. BatchMode would
+    // disable that path entirely; key/agent connections remain fully
+    // non-interactive.
+    ...(config.password
+      ? [
+          "-o", "BatchMode=no",
+          "-o", "PreferredAuthentications=password,keyboard-interactive",
+          "-o", "PubkeyAuthentication=no",
+        ]
+      : ["-o", "BatchMode=yes"]),
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", `ConnectTimeout=${CONNECT_TIMEOUT_SECONDS}`,
     "-o", "ServerAliveInterval=15",
@@ -116,10 +124,33 @@ export function sshTarget(config: SshConfig): string {
  * and stores it on `config.sshAgent`. Without this the spawned `ssh` would not
  * see the agent and would fail exactly like the old `ssh2` path.
  */
-export function sshChildEnv(config: SshConfig): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+export function sshChildEnv(
+  config: SshConfig,
+  platform = process.platform,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
   if (config.sshAgent) {
     env.SSH_AUTH_SOCK = config.sshAgent;
+  }
+  if (config.password && config.sshAskpassPath) {
+    env.SSH_ASKPASS = config.sshAskpassPath;
+    env.SSH_ASKPASS_REQUIRE = "force";
+    env.OPENSHIP_SSH_ASKPASS_PASSWORD = config.password;
+    if (config.sshAskpassNodePath) {
+      env.OPENSHIP_SSH_ASKPASS_NODE = config.sshAskpassNodePath;
+    }
+  }
+
+  // The packaged Windows desktop ships cloudflared beside the app. Prepending
+  // its directory lets the portable preset use `cloudflared access ssh ...`
+  // while preserving explicit ProxyCommand paths and developer environments.
+  const bundledCloudflared = env.OPENSHIP_CLOUDFLARED_PATH;
+  if (platform === "win32" && bundledCloudflared) {
+    const cloudflaredDir = platform === "win32"
+      ? win32Path.dirname(bundledCloudflared)
+      : dirname(bundledCloudflared);
+    env.PATH = `${cloudflaredDir};${env.PATH ?? ""}`;
   }
   return env;
 }

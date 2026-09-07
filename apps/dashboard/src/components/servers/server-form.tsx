@@ -10,6 +10,7 @@ import {
   Lock,
   ChevronDown,
   Network,
+  Cloud,
   X,
   ClipboardPaste,
   Upload,
@@ -659,6 +660,22 @@ export function ServerForm({
             </div>
           )}
         </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            setProxyCommand("cloudflared access ssh --hostname %h");
+            setShowAdvanced(true);
+          }}
+          className={`text-[13px] font-medium transition-colors flex items-center gap-1.5 ${
+            /(?:^|[\s/])cloudflared(?:\.exe)?\s+access\s+ssh\b/i.test(proxyCommand.trim())
+              ? "text-primary"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Cloud className="size-3.5" />
+          {t.servers.form.cloudflareSsh}
+        </button>
 
         <button
           type="button"

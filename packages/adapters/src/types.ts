@@ -794,6 +794,10 @@ export interface SshConfig {
   sshProxyCommand?: string;
   /** Extra raw `ssh` CLI arguments. Honored by the system-ssh path. */
   sshArgs?: string;
+  /** Internal temporary askpass helper used by system OpenSSH password auth. */
+  sshAskpassPath?: string;
+  /** Runtime used by the temporary askpass wrapper (Node or Electron-as-Node). */
+  sshAskpassNodePath?: string;
   /**
    * How long to wait for the SSH handshake. Left unset, ssh2's 20s default applies —
    * right for a remote box over the internet, far too long for the container→host
